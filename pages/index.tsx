@@ -4,8 +4,8 @@ import Link from 'next/link';
 type Trip = {
   _id: string;
   destination: string;
-  startDate: string; // ISO from API
-  endDate: string;   // ISO from API
+  startDate: string;
+  endDate: string;
   travelers: number;
   preferences?: string[];
   budgetLevel?: 'low' | 'mid' | 'high';
@@ -27,26 +27,67 @@ type Trip = {
   createdAt: string;
 };
 
+const budgetOptions = ['low', 'mid', 'high'] as const;
+const MAX_TRIP_DAYS = 183;
+
+function formatDate(value: string) {
+  return new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric' }).format(new Date(value));
+}
+
+function getTripDays(trip: Trip) {
+  const start = new Date(trip.startDate).getTime();
+  const end = new Date(trip.endDate).getTime();
+  return Math.max(1, Math.round((end - start) / 86400000) + 1);
+}
+
 export default function HomePage() {
-  // form state
   const [destination, setDestination] = useState('');
-  const [startDate, setStartDate] = useState(''); // YYYY-MM-DD
-  const [endDate, setEndDate] = useState('');     // YYYY-MM-DD
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
   const [travelers, setTravelers] = useState<number>(1);
-  const [preferencesInput, setPreferencesInput] = useState(''); // comma-separated
-  const [budgetLevel, setBudgetLevel] = useState<'low'|'mid'|'high'|''>('');
+  const [preferencesInput, setPreferencesInput] = useState('');
+  const [budgetLevel, setBudgetLevel] = useState<'low' | 'mid' | 'high' | ''>('');
   const [notes, setNotes] = useState('');
 
-  // ui state
   const [trips, setTrips] = useState<Trip[]>([]);
   const [creating, setCreating] = useState(false);
+  const [editingTripId, setEditingTripId] = useState<string | null>(null);
   const [planLoadingId, setPlanLoadingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'planned' | 'draft'>('all');
 
   const preferences = useMemo(
-    () => preferencesInput.split(',').map(s => s.trim()).filter(Boolean),
+    () => preferencesInput.split(',').map((s) => s.trim()).filter(Boolean),
     [preferencesInput]
   );
+
+  const filteredTrips = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+
+    return trips.filter((trip) => {
+      const planned = (trip.itinerary?.length || 0) > 0;
+      const matchesStatus =
+        statusFilter === 'all' || (statusFilter === 'planned' ? planned : !planned);
+      const haystack = [
+        trip.destination,
+        trip.budgetLevel,
+        trip.notes,
+        ...(trip.preferences || []),
+        ...(trip.tags || [])
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+
+      return matchesStatus && (!normalizedQuery || haystack.includes(normalizedQuery));
+    });
+  }, [query, statusFilter, trips]);
+
+  const plannedCount = trips.filter((trip) => (trip.itinerary?.length || 0) > 0).length;
+  const totalDays = trips.reduce((sum, trip) => sum + getTripDays(trip), 0);
+  const formTitle = editingTripId ? 'Edit trip' : 'Create itinerary';
+  const submitLabel = editingTripId ? 'Save changes' : 'Create trip';
 
   async function fetchTrips() {
     setError(null);
@@ -64,17 +105,55 @@ export default function HomePage() {
     fetchTrips();
   }, []);
 
-  async function createTrip(e: React.FormEvent) {
+  function resetForm() {
+    setDestination('');
+    setStartDate('');
+    setEndDate('');
+    setTravelers(1);
+    setPreferencesInput('');
+    setBudgetLevel('');
+    setNotes('');
+    setEditingTripId(null);
+  }
+
+  function startEditingTrip(trip: Trip) {
+    setError(null);
+    setEditingTripId(trip._id);
+    setDestination(trip.destination);
+    setStartDate(new Date(trip.startDate).toISOString().slice(0, 10));
+    setEndDate(new Date(trip.endDate).toISOString().slice(0, 10));
+    setTravelers(trip.travelers);
+    setPreferencesInput((trip.preferences || []).join(', '));
+    setBudgetLevel(trip.budgetLevel || '');
+    setNotes(trip.notes || '');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  async function submitTrip(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     if (!destination || !startDate || !endDate || !travelers) {
       setError('Please fill destination, dates, and travelers.');
       return;
     }
+
+    const selectedDays = getTripDays({
+      _id: '',
+      destination,
+      startDate,
+      endDate,
+      travelers,
+      createdAt: ''
+    });
+    if (selectedDays > MAX_TRIP_DAYS) {
+      setError(`Trips can be at most ${MAX_TRIP_DAYS} days, roughly 6 months.`);
+      return;
+    }
+
     setCreating(true);
     try {
-      const res = await fetch('/api/trips', {
-        method: 'POST',
+      const res = await fetch(editingTripId ? `/api/trips/${editingTripId}` : '/api/trips', {
+        method: editingTripId ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           destination,
@@ -88,19 +167,12 @@ export default function HomePage() {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || `Create failed (${res.status})`);
+        throw new Error(err.error || `${editingTripId ? 'Update' : 'Create'} failed (${res.status})`);
       }
-      // clear some fields (keep destination if you like)
-      setDestination('');
-      setStartDate('');
-      setEndDate('');
-      setTravelers(1);
-      setPreferencesInput('');
-      setBudgetLevel('');
-      setNotes('');
+      resetForm();
       await fetchTrips();
     } catch (e: any) {
-      setError(e.message || 'Failed to create trip');
+      setError(e.message || `Failed to ${editingTripId ? 'update' : 'create'} trip`);
     } finally {
       setCreating(false);
     }
@@ -126,199 +198,676 @@ export default function HomePage() {
   }
 
   return (
-    <main style={{ maxWidth: 960, margin: '2rem auto', padding: '0 1rem', fontFamily: 'ui-sans-serif, system-ui' }}>
-      <h1 style={{ marginBottom: 8 }}>🗺️ voyAIge</h1>
-      <p style={{ color: '#555', marginTop: 0, marginBottom: '1.25rem' }}>
-        Create a trip, then generate a day-by-day itinerary with AI.
-      </p>
+    <main className="page-shell">
+      <section className="app-header">
+        <div>
+          <p className="eyebrow">AI itinerary workspace</p>
+          <h1>voyAIge</h1>
+          <p className="lede">Shape trip ideas, generate day plans, and keep every itinerary easy to scan.</p>
+        </div>
 
-      {/* Create Trip Form */}
-      <form onSubmit={createTrip} style={{ border: '1px solid #ddd', borderRadius: 8, padding: 16, marginBottom: 24 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-          <div>
-            <label>Destination</label>
-            <input
-              value={destination}
-              onChange={(e) => setDestination(e.target.value)}
-              placeholder="Lisbon, Portugal"
-              style={inputStyle}
-              required
-            />
+        <div className="stats-grid" aria-label="Trip stats">
+          <div className="stat">
+            <span>{trips.length}</span>
+            <small>Trips</small>
           </div>
-
-          <div>
-            <label>Travelers</label>
-            <input
-              type="number"
-              min={1}
-              value={travelers}
-              onChange={(e) => setTravelers(Number(e.target.value))}
-              style={inputStyle}
-              required
-            />
+          <div className="stat">
+            <span>{plannedCount}</span>
+            <small>Planned</small>
           </div>
-
-          <div>
-            <label>Start Date</label>
-            <input
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              style={inputStyle}
-              required
-            />
+          <div className="stat">
+            <span>{totalDays}</span>
+            <small>Days</small>
           </div>
+        </div>
+      </section>
 
-          <div>
-            <label>End Date</label>
-            <input
-              type="date"
-              value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              style={inputStyle}
-              required
-            />
-          </div>
+      {error && <p className="alert">{error}</p>}
 
-          <div style={{ gridColumn: '1 / -1' }}>
-            <label>Preferences (comma-separated)</label>
-            <input
-              value={preferencesInput}
-              onChange={(e) => setPreferencesInput(e.target.value)}
-              placeholder="food, museums, outdoors"
-              style={inputStyle}
-            />
-          </div>
-
-          <div>
-            <label>Budget</label>
-            <div style={{ display: 'flex', gap: 12, marginTop: 6 }}>
-              {(['low', 'mid', 'high'] as const).map((b) => (
-                <label key={b} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                  <input
-                    type="radio"
-                    name="budget"
-                    value={b}
-                    checked={budgetLevel === b}
-                    onChange={() => setBudgetLevel(b)}
-                  />
-                  {b}
-                </label>
-              ))}
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                <input
-                  type="radio"
-                  name="budget"
-                  value=""
-                  checked={budgetLevel === ''}
-                  onChange={() => setBudgetLevel('')}
-                />
-                none
-              </label>
+      <section className="workspace">
+        <form onSubmit={submitTrip} className="planner-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">{editingTripId ? 'Update trip' : 'New trip'}</p>
+              <h2>{formTitle}</h2>
+            </div>
+            <div className="form-actions">
+              {editingTripId && (
+                <button type="button" onClick={resetForm} className="secondary-action compact">
+                  Cancel
+                </button>
+              )}
+              <button type="submit" disabled={creating} className="primary-action">
+                {creating ? 'Saving...' : submitLabel}
+              </button>
             </div>
           </div>
 
-          <div style={{ gridColumn: '1 / -1' }}>
-            <label>Notes</label>
-            <textarea
-              rows={3}
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="Anything the model should consider (mobility, allergies, must-see spots)..."
-              style={{ ...inputStyle, minHeight: 72 }}
-            />
-          </div>
-        </div>
+          <p className="form-note">Trips can be planned for up to roughly 6 months.</p>
 
-        <div style={{ marginTop: 12 }}>
-          <button type="submit" disabled={creating} style={buttonStyle}>
-            {creating ? 'Creating…' : 'Create Trip'}
-          </button>
-        </div>
-      </form>
+          <div className="form-grid">
+            <label>
+              <span>Destination</span>
+              <input
+                value={destination}
+                onChange={(e) => setDestination(e.target.value)}
+                placeholder="Lisbon, Portugal"
+                required
+              />
+            </label>
 
-      {error && (
-        <p style={{ color: '#b00020', marginTop: -8, marginBottom: 16 }}>
-          {error}
-        </p>
-      )}
+            <label>
+              <span>Travelers</span>
+              <input
+                type="number"
+                min={1}
+                value={travelers}
+                onChange={(e) => setTravelers(Number(e.target.value))}
+                required
+              />
+            </label>
 
-      {/* Trips List */}
-      <h2 style={{ marginTop: 0 }}>Your Trips</h2>
-      {trips.length === 0 ? (
-        <p>No trips yet. Create one above.</p>
-      ) : (
-        <div style={{ display: 'grid', gap: 12 }}>
-          {trips.map((t) => {
-            const planned = (t.itinerary?.length || 0) > 0;
-            return (
-              <div key={t._id} style={{ border: '1px solid #eee', borderRadius: 8, padding: 12 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-                  <div>
-                    <div style={{ fontWeight: 600 }}>{t.destination}</div>
-                    <div style={{ fontSize: 14, color: '#555' }}>
-                      {new Date(t.startDate).toISOString().slice(0,10)} → {new Date(t.endDate).toISOString().slice(0,10)} · {t.travelers} traveler{t.travelers>1?'s':''}
-                    </div>
-                    {t.tags && t.tags.length > 0 && (
-                      <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                        {t.tags.map((tag) => (
-                          <span key={tag} style={pillStyle}>{tag}</span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <button
-                      onClick={() => planTrip(t._id, false)}
-                      disabled={planLoadingId === t._id}
-                      style={buttonStyle}
-                    >
-                      {planLoadingId === t._id ? 'Planning…' : planned ? 'Re-plan' : 'Plan'}
-                    </button>
-                    {planned && (
-                      <button
-                        onClick={() => planTrip(t._id, true)}
-                        disabled={planLoadingId === t._id}
-                        style={{ ...buttonStyle, background: '#444' }}
-                      >
-                        {planLoadingId === t._id ? 'Planning…' : 'Force Re-plan'}
-                      </button>
-                    )}
-                    <Link href={`/trips/${t._id}`} style={{ ...buttonStyle, textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
-                      Open
-                    </Link>
-                  </div>
-                </div>
+            <label>
+              <span>Start date</span>
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                required
+              />
+            </label>
+
+            <label>
+              <span>End date</span>
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                required
+              />
+            </label>
+
+            <label className="wide">
+              <span>Preferences</span>
+              <input
+                value={preferencesInput}
+                onChange={(e) => setPreferencesInput(e.target.value)}
+                placeholder="food, museums, outdoors"
+              />
+            </label>
+
+            <div className="wide">
+              <span className="field-label">Budget</span>
+              <div className="segment-control">
+                {budgetOptions.map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    className={budgetLevel === option ? 'active' : ''}
+                    onClick={() => setBudgetLevel(option)}
+                  >
+                    {option}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  className={budgetLevel === '' ? 'active' : ''}
+                  onClick={() => setBudgetLevel('')}
+                >
+                  none
+                </button>
               </div>
-            );
-          })}
-        </div>
-      )}
+            </div>
+
+            <label className="wide">
+              <span>Notes</span>
+              <textarea
+                rows={4}
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="Mobility needs, allergies, must-see places, pacing..."
+              />
+            </label>
+          </div>
+        </form>
+
+        <section className="trip-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Library</p>
+              <h2>Your trips</h2>
+            </div>
+            <div className="filters">
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search trips"
+                aria-label="Search trips"
+              />
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as 'all' | 'planned' | 'draft')}
+                aria-label="Filter trips"
+              >
+                <option value="all">All</option>
+                <option value="planned">Planned</option>
+                <option value="draft">Draft</option>
+              </select>
+            </div>
+          </div>
+
+          {filteredTrips.length === 0 ? (
+            <div className="empty-state">
+              <strong>No matching trips</strong>
+              <span>{trips.length ? 'Try a different search or filter.' : 'Create one to start planning.'}</span>
+            </div>
+          ) : (
+            <div className="trip-list">
+              {filteredTrips.map((trip) => {
+                const planned = (trip.itinerary?.length || 0) > 0;
+                const dayCount = getTripDays(trip);
+                const activityCount = trip.itinerary?.reduce((sum, day) => sum + (day.activities?.length || 0), 0) || 0;
+
+                return (
+                  <article key={trip._id} className="trip-card">
+                    <div className="trip-card-main">
+                      <div>
+                        <div className="trip-title-row">
+                          <h3>{trip.destination}</h3>
+                          <span className={planned ? 'status planned' : 'status draft'}>
+                            {planned ? 'Planned' : 'Draft'}
+                          </span>
+                        </div>
+                        <p className="trip-meta">
+                          {formatDate(trip.startDate)} - {formatDate(trip.endDate)} · {dayCount} day{dayCount === 1 ? '' : 's'} · {trip.travelers} traveler{trip.travelers === 1 ? '' : 's'}
+                        </p>
+                      </div>
+
+                      <div className="trip-actions">
+                        <button
+                          type="button"
+                          onClick={() => planTrip(trip._id, planned)}
+                          disabled={planLoadingId === trip._id}
+                          className="primary-action compact"
+                        >
+                          {planLoadingId === trip._id ? 'Planning...' : planned ? 'Re-plan' : 'Plan'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => startEditingTrip(trip)}
+                          className="secondary-action"
+                        >
+                          Edit
+                        </button>
+                        <Link href={`/trips/${trip._id}`} className="secondary-action">
+                          Open
+                        </Link>
+                      </div>
+                    </div>
+
+                    <div className="trip-foot">
+                      <div className="mini-stats">
+                        <span>{activityCount} activities</span>
+                        {trip.budgetLevel && <span>{trip.budgetLevel} budget</span>}
+                      </div>
+                      {trip.tags && trip.tags.length > 0 && (
+                        <div className="pill-row">
+                          {trip.tags.slice(0, 5).map((tag) => (
+                            <span key={tag} className="pill">{tag}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      </section>
+
+      <style jsx>{`
+        :global(body) {
+          margin: 0;
+          background: #f6f4ef;
+          color: #18212a;
+          font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        :global(*) {
+          box-sizing: border-box;
+        }
+
+        .page-shell {
+          width: min(1180px, calc(100% - 32px));
+          margin: 0 auto;
+          padding: 36px 0 56px;
+        }
+
+        .app-header {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 24px;
+          align-items: end;
+          margin-bottom: 24px;
+        }
+
+        .eyebrow {
+          margin: 0 0 6px;
+          color: #667085;
+          font-size: 12px;
+          font-weight: 700;
+          letter-spacing: 0;
+          text-transform: uppercase;
+        }
+
+        h1, h2, h3, p {
+          margin-top: 0;
+        }
+
+        h1 {
+          margin-bottom: 8px;
+          color: #102027;
+          font-size: clamp(34px, 7vw, 64px);
+          line-height: 0.95;
+          letter-spacing: 0;
+        }
+
+        h2 {
+          margin-bottom: 0;
+          font-size: 22px;
+          line-height: 1.15;
+          letter-spacing: 0;
+        }
+
+        h3 {
+          margin-bottom: 0;
+          font-size: 17px;
+          line-height: 1.25;
+          letter-spacing: 0;
+        }
+
+        .lede {
+          max-width: 560px;
+          margin-bottom: 0;
+          color: #475467;
+          font-size: 16px;
+          line-height: 1.6;
+        }
+
+        .stats-grid {
+          display: grid;
+          grid-template-columns: repeat(3, 92px);
+          gap: 10px;
+        }
+
+        .stat {
+          border: 1px solid #ddd8ce;
+          border-radius: 8px;
+          background: #fffdf8;
+          padding: 12px;
+        }
+
+        .stat span {
+          display: block;
+          font-size: 24px;
+          font-weight: 800;
+          line-height: 1;
+        }
+
+        .stat small {
+          color: #667085;
+          font-size: 12px;
+        }
+
+        .alert {
+          border: 1px solid #fecaca;
+          border-radius: 8px;
+          background: #fff1f2;
+          color: #9f1239;
+          padding: 12px 14px;
+        }
+
+        .workspace {
+          display: grid;
+          grid-template-columns: minmax(320px, 430px) minmax(0, 1fr);
+          gap: 18px;
+          align-items: start;
+        }
+
+        .planner-panel,
+        .trip-panel {
+          border: 1px solid #ddd8ce;
+          border-radius: 8px;
+          background: #fffdf8;
+          box-shadow: 0 14px 35px rgba(16, 32, 39, 0.08);
+        }
+
+        .planner-panel {
+          position: sticky;
+          top: 20px;
+          padding: 18px;
+        }
+
+        .trip-panel {
+          padding: 18px;
+        }
+
+        .panel-heading {
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          align-items: start;
+          margin-bottom: 18px;
+        }
+
+        .form-actions {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+        }
+
+        .form-note {
+          margin: -6px 0 16px;
+          color: #667085;
+          font-size: 13px;
+          line-height: 1.45;
+        }
+
+        .form-grid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 14px;
+        }
+
+        label,
+        .wide {
+          min-width: 0;
+        }
+
+        label span,
+        .field-label {
+          display: block;
+          margin-bottom: 7px;
+          color: #344054;
+          font-size: 13px;
+          font-weight: 700;
+        }
+
+        input,
+        textarea,
+        select {
+          width: 100%;
+          border: 1px solid #d0d5dd;
+          border-radius: 8px;
+          background: #ffffff;
+          color: #18212a;
+          font: inherit;
+          font-size: 14px;
+          outline: none;
+          transition: border-color 120ms ease, box-shadow 120ms ease;
+        }
+
+        input,
+        select {
+          height: 42px;
+          padding: 0 12px;
+        }
+
+        textarea {
+          min-height: 104px;
+          padding: 11px 12px;
+          resize: vertical;
+        }
+
+        input:focus,
+        textarea:focus,
+        select:focus {
+          border-color: #0f766e;
+          box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14);
+        }
+
+        .wide {
+          grid-column: 1 / -1;
+        }
+
+        .segment-control {
+          display: grid;
+          grid-template-columns: repeat(4, 1fr);
+          gap: 6px;
+          border: 1px solid #d0d5dd;
+          border-radius: 8px;
+          background: #f2f4f7;
+          padding: 4px;
+        }
+
+        .segment-control button {
+          min-height: 34px;
+          border: 0;
+          border-radius: 6px;
+          background: transparent;
+          color: #475467;
+          cursor: pointer;
+          font: inherit;
+          font-size: 13px;
+          font-weight: 700;
+        }
+
+        .segment-control button.active {
+          background: #ffffff;
+          color: #0f766e;
+          box-shadow: 0 1px 3px rgba(16, 32, 39, 0.14);
+        }
+
+        .primary-action,
+        .secondary-action {
+          display: inline-flex;
+          min-height: 40px;
+          align-items: center;
+          justify-content: center;
+          border-radius: 8px;
+          padding: 0 14px;
+          font: inherit;
+          font-size: 14px;
+          font-weight: 800;
+          text-decoration: none;
+          white-space: nowrap;
+        }
+
+        .primary-action {
+          border: 1px solid #0f766e;
+          background: #0f766e;
+          color: #ffffff;
+          cursor: pointer;
+        }
+
+        .primary-action:disabled {
+          cursor: wait;
+          opacity: 0.65;
+        }
+
+        .primary-action.compact {
+          min-height: 36px;
+        }
+
+        .secondary-action.compact {
+          min-height: 40px;
+        }
+
+        .secondary-action {
+          border: 1px solid #d0d5dd;
+          background: #ffffff;
+          color: #344054;
+        }
+
+        .filters {
+          display: grid;
+          grid-template-columns: minmax(180px, 1fr) 112px;
+          gap: 10px;
+          width: min(360px, 100%);
+        }
+
+        .trip-list {
+          display: grid;
+          gap: 12px;
+        }
+
+        .trip-card {
+          border: 1px solid #e4e0d7;
+          border-radius: 8px;
+          background: #ffffff;
+          padding: 15px;
+          transition: border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+        }
+
+        .trip-card:hover {
+          border-color: #99b8b3;
+          box-shadow: 0 12px 24px rgba(16, 32, 39, 0.08);
+          transform: translateY(-1px);
+        }
+
+        .trip-card-main {
+          display: flex;
+          justify-content: space-between;
+          gap: 14px;
+          align-items: start;
+        }
+
+        .trip-title-row {
+          display: flex;
+          gap: 10px;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+
+        .trip-meta {
+          margin: 6px 0 0;
+          color: #667085;
+          font-size: 14px;
+          line-height: 1.45;
+        }
+
+        .trip-actions {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+        }
+
+        .trip-foot {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: end;
+          margin-top: 16px;
+        }
+
+        .mini-stats,
+        .pill-row {
+          display: flex;
+          gap: 6px;
+          flex-wrap: wrap;
+        }
+
+        .mini-stats span,
+        .pill,
+        .status {
+          border-radius: 999px;
+          padding: 4px 9px;
+          font-size: 12px;
+          font-weight: 800;
+          line-height: 1.2;
+        }
+
+        .mini-stats span {
+          background: #f2f4f7;
+          color: #475467;
+        }
+
+        .pill {
+          background: #e6f4f1;
+          color: #0f766e;
+        }
+
+        .status.planned {
+          background: #dcfce7;
+          color: #166534;
+        }
+
+        .status.draft {
+          background: #fff7ed;
+          color: #9a3412;
+        }
+
+        .empty-state {
+          display: grid;
+          place-items: center;
+          min-height: 220px;
+          border: 1px dashed #d0d5dd;
+          border-radius: 8px;
+          color: #667085;
+          text-align: center;
+        }
+
+        .empty-state strong {
+          display: block;
+          color: #18212a;
+          font-size: 18px;
+        }
+
+        @media (max-width: 900px) {
+          .app-header,
+          .workspace {
+            grid-template-columns: 1fr;
+          }
+
+          .stats-grid {
+            grid-template-columns: repeat(3, 1fr);
+          }
+
+          .planner-panel {
+            position: static;
+          }
+        }
+
+        @media (max-width: 640px) {
+          .page-shell {
+            width: min(100% - 24px, 1180px);
+            padding-top: 24px;
+          }
+
+          .panel-heading,
+          .trip-card-main,
+          .trip-foot {
+            flex-direction: column;
+            align-items: stretch;
+          }
+
+          .form-actions {
+            justify-content: stretch;
+          }
+
+          .form-actions > * {
+            flex: 1;
+          }
+
+          .form-grid,
+          .filters {
+            grid-template-columns: 1fr;
+          }
+
+          .trip-actions {
+            justify-content: stretch;
+          }
+
+          .trip-actions > * {
+            flex: 1;
+          }
+        }
+      `}</style>
     </main>
   );
 }
-
-const inputStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '8px 10px',
-  marginTop: 6,
-  border: '1px solid #ddd',
-  borderRadius: 6,
-  fontSize: 14
-};
-
-const buttonStyle: React.CSSProperties = {
-  padding: '8px 12px',
-  borderRadius: 6,
-  border: '1px solid #000',
-  background: '#000',
-  color: '#fff',
-  cursor: 'pointer'
-};
-
-const pillStyle: React.CSSProperties = {
-  fontSize: 12,
-  padding: '2px 8px',
-  borderRadius: 999,
-  background: '#f1f1f1'
-};

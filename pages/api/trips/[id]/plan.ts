@@ -3,6 +3,7 @@ import { connectToDatabase } from '@/lib/mongodb';
 import Trip from '@/models/Trip';
 import OpenAI from 'openai';
 import mongoose from 'mongoose';
+import { daysBetween, MAX_TRIP_DAYS } from '@/lib/tripValidation';
 // import OpenAI from 'openai'  // we’ll init Groq-compatible client
 
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
@@ -23,6 +24,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const force = req.query.force === '1';
     if (!force && trip.itinerary?.length) {
         return res.status(200).json(trip); // already planned
+    }
+
+    const requestedDays = daysBetween(trip.startDate, trip.endDate);
+    if (requestedDays > MAX_TRIP_DAYS) {
+        return res.status(400).json({ error: `Trips can be at most ${MAX_TRIP_DAYS} days, roughly 6 months.` });
     }
 
     // 2) build prompt
@@ -89,14 +95,12 @@ Rules:
     // 5) save itinerary + tags
 
     const isISO = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
-    const daysBetween = (a: string, b: string) =>
-        Math.round((+new Date(b) - +new Date(a)) / 86400000) + 1;
     if (!Array.isArray(parsed.itinerary) || parsed.itinerary.length === 0)
         return res.status(502).json({ error: 'No itinerary in response', raw });
 
     const startISO = trip.startDate.toISOString().slice(0, 10);
     const endISO = trip.endDate.toISOString().slice(0, 10);
-    const expectedDays = daysBetween(startISO, endISO);
+    const expectedDays = daysBetween(new Date(startISO), new Date(endISO));
 
     // date count sanity (allow off-by-one once; models aren’t perfect)
     if (parsed.itinerary.length < expectedDays - 1 || parsed.itinerary.length > expectedDays + 1) {
