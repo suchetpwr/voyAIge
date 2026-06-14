@@ -5,11 +5,17 @@ import OpenAI from 'openai';
 import mongoose from 'mongoose';
 // import OpenAI from 'openai'  // we’ll init Groq-compatible client
 
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
     await connectToDatabase();
 
     const { id } = req.query;
+    if (!mongoose.isValidObjectId(id)) {
+        return res.status(400).json({ error: 'Invalid trip id' });
+    }
+
     // 1) load trip
     const trip = await Trip.findById(id);
     if (!trip) return res.status(404).json({ error: 'Trip not found' });
@@ -18,11 +24,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (!force && trip.itinerary?.length) {
         return res.status(200).json(trip); // already planned
     }
-
-    if (!mongoose.isValidObjectId(id)) {
-        return res.status(400).json({ error: 'Invalid trip id' });
-    }
-
 
     // 2) build prompt
     const prompt = `
@@ -45,26 +46,29 @@ Rules:
     // 3) call LLM
 
 
+    if (!process.env.GROQ_API_KEY) {
+        return res.status(500).json({ error: 'Server misconfigured: missing GROQ_API_KEY' });
+    }
+
     const groq = new OpenAI({
         apiKey: process.env.GROQ_API_KEY,
         baseURL: 'https://api.groq.com/openai/v1',
     });
 
-    if (!process.env.GROQ_API_KEY) {
-        return res.status(500).json({ error: 'Server misconfigured: missing GROQ_API_KEY' });
-    }
-
     let raw = '';
     try {
         const completion = await groq.chat.completions.create({
-            model: 'llama3-70b-8192',      
+            model: GROQ_MODEL,
             messages: [{ role: 'user', content: prompt }], 
             temperature: 0.2,
         });
         raw = completion.choices[0]?.message?.content ?? '';
     } catch (e: any) {
         console.error('LLM error:', e?.message || e);
-        return res.status(502).json({ error: 'Planner service failed' });
+        return res.status(502).json({
+            error: 'Planner service failed',
+            ...(process.env.NODE_ENV !== 'production' && { detail: e?.message || String(e) })
+        });
     }
 
     // 4) extract + validate JSON
